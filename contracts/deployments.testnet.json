@@ -1,0 +1,17 @@
+{
+  "network": "testnet",
+  "passphrase": "Test SDF Network ; September 2015",
+  "vaults": [
+    {
+      "asset": "XLM",
+      "contract_id": "CDPUJYCTPGPEGS6MBXYLEWTYSGCPVKUHCURLF2ORT3RAVL5TF5JKIAI5",
+      "token_sac": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "domain": 67890,
+      "admin": "GAEEH5TB44ZLBZ7PLWHGNRH2VFYGIE4YKF2Z34JXBNWSB7NVDD6HL2JC",
+      "max_deposit": 1000000000,
+      "tvl_cap": 1000000000000,
+      "wasm_hash": "ec8ddd75df79ee58722a0ce350828e45a9e8c2593b4a3cf9cabcba8a95d5355d",
+      "vk_sha256": "0e4e9d81c4a30c4969fa9e66c098934f53a23490a914cf1b5be6ef638c056c3e"
+    }
+  ]
+}
