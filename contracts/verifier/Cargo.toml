@@ -1,0 +1,24 @@
+[package]
+name = "verifier"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+build = "build.rs"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+types = { path = "../types" }
+
+[build-dependencies]
+ark-bn254 = { version = "0.5" }
+ark-ff = { version = "0.5" }
+num-bigint = { version = "0.4" }
+serde_json = { version = "1" }
+sha2 = { version = "0.10" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

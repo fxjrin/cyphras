@@ -1,0 +1,18 @@
+[package]
+name = "vault"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["hazmat"] }
+types = { path = "../types" }
+verifier = { path = "../verifier" }
+poseidon2 = { path = "../poseidon2" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["hazmat", "testutils"] }
