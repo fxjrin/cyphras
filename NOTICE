@@ -1,0 +1,11 @@
+Cyphras
+Copyright 2026 Cyphras
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party components:
+
+- Poseidon2 round constants are derived from the Horizen Labs reference
+  (https://github.com/HorizenLabs/poseidon2).
+- circomlib circuit templates are by the 0KIMS association, licensed under
+  the GNU General Public License v3.0 (https://github.com/iden3/circomlib).

@@ -1,0 +1,29 @@
+# Dependencies / build output (any subproject)
+**/node_modules/
+extension/dist/
+extension/src/app/.vite/
+circuits/build/
+contracts/target/
+offchain/dist/
+
+# Large / re-downloadable circuit artifacts (the zkey + vk are committed: canonical proving keys)
+circuits/keys/*.ptau
+circuits/keys/*_0000.zkey
+circuits/keys/*_0001.zkey
+
+# Secrets
+.env
+.env.local
+.env.*.local
+**/.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# TypeScript
+*.tsbuildinfo
