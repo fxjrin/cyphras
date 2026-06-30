@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cyphras}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-cyphras_shielded}
+    # loopback-only so the database is never reachable from the public network
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cyphras} -d ${POSTGRES_DB:-cyphras_shielded}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  indexer:
+    build: ./indexer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-cyphras}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cyphras_shielded}
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${VAULT_CONTRACT_ID}
+      CONFIRMATIONS: ${CONFIRMATIONS:-1}
+      SYNC_LAG_THRESHOLD: ${SYNC_LAG_THRESHOLD:-100}
+      PORT: "8080"
+    # loopback-only; host nginx terminates TLS and proxies /indexer/ here
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+  relayer:
+    build: ./relayer
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${VAULT_CONTRACT_ID}
+      RELAYER_SECRET: ${RELAYER_SECRET}
+      POOL_RELAYER_ADDRESS: ${POOL_RELAYER_ADDRESS:-GASOF6NKJJWYE4AB2SFXK6RD26VBYGWNK2KL7TLZT2S3YRS3NRQWH4UQ}
+      NET_COST: ${NET_COST:-700000}
+      MARGIN_BPS: ${MARGIN_BPS:-2000}
+      MIN_MARGIN_BPS: ${MIN_MARGIN_BPS:-500}
+      QUOTE_BUFFER_BPS: ${QUOTE_BUFFER_BPS:-1000}
+      RATE_PPM: ${RATE_PPM:-1000000}
+      PORT: "8081"
+    # loopback-only; host nginx terminates TLS and proxies /relayer/ here
+    ports:
+      - "127.0.0.1:8081:8081"
+    restart: unless-stopped
+
+  keeper:
+    build: ./relayer
+    command: ["node", "dist/keeper.js"]
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${VAULT_CONTRACT_ID}
+      KEEPER_SECRET: ${KEEPER_SECRET}
+      KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-604800000}
+    restart: unless-stopped
+
+volumes:
+  pgdata:
