@@ -37,7 +37,7 @@ export const POOLS: Pool[] = [
     domain: 67890n,
     indexerUrl: `${BASE}/indexer`,
     relayerUrl: `${BASE}/relayer`,
-    relayerAddress: "GDEPXRVATYLS6BO7IP4FCENJKGTMZ72FIZJKPEHLXW4PMHWHMBIL24QY",
+    relayerAddress: "GASOF6NKJJWYE4AB2SFXK6RD26VBYGWNK2KL7TLZT2S3YRS3NRQWH4UQ",
     native: true,
     decimals: 7,
     maxDeposit: 1_000_000_000n,
