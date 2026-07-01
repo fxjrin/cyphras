@@ -65,5 +65,72 @@ services:
       KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-604800000}
     restart: unless-stopped
 
+  # USDC pool: own database (XLM data untouched), own indexer/relayer/keeper bound
+  # to the USDC vault. The relayer collects its fee in USDC, so RATE_PPM converts
+  # the XLM gas it fronts into USDC (USDC per XLM, x1e6).
+  postgres-usdc:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cyphras}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_USDC_DB:-cyphras_shielded_usdc}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata_usdc:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cyphras} -d ${POSTGRES_USDC_DB:-cyphras_shielded_usdc}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  indexer-usdc:
+    build: ./indexer
+    depends_on:
+      postgres-usdc:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-cyphras}:${POSTGRES_PASSWORD}@postgres-usdc:5432/${POSTGRES_USDC_DB:-cyphras_shielded_usdc}
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${USDC_VAULT_CONTRACT_ID:-CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ}
+      CONFIRMATIONS: ${CONFIRMATIONS:-1}
+      SYNC_LAG_THRESHOLD: ${SYNC_LAG_THRESHOLD:-100}
+      PORT: "8082"
+    ports:
+      - "127.0.0.1:8082:8082"
+    restart: unless-stopped
+
+  relayer-usdc:
+    build: ./relayer
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${USDC_VAULT_CONTRACT_ID:-CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ}
+      RELAYER_SECRET: ${RELAYER_SECRET}
+      POOL_RELAYER_ADDRESS: ${POOL_RELAYER_ADDRESS:-GASOF6NKJJWYE4AB2SFXK6RD26VBYGWNK2KL7TLZT2S3YRS3NRQWH4UQ}
+      NET_COST: ${NET_COST:-700000}
+      MARGIN_BPS: ${MARGIN_BPS:-2000}
+      MIN_MARGIN_BPS: ${MIN_MARGIN_BPS:-500}
+      QUOTE_BUFFER_BPS: ${QUOTE_BUFFER_BPS:-1000}
+      RATE_PPM: ${USDC_RATE_PPM:-200000}
+      PORT: "8083"
+    ports:
+      - "127.0.0.1:8083:8083"
+    restart: unless-stopped
+
+  keeper-usdc:
+    build: ./relayer
+    command: ["node", "dist/keeper.js"]
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${USDC_VAULT_CONTRACT_ID:-CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ}
+      KEEPER_SECRET: ${KEEPER_SECRET}
+      KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-604800000}
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  pgdata_usdc:
