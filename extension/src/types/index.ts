@@ -146,6 +146,24 @@ export interface ServiceResponse {
     asset_issuer?: string
   }> | null
   subentryCount?: number
+  // Private mode (shielded). Amounts are stringified stroops to stay JSON-safe.
+  shieldedAddress?: string
+  shieldedBalance?: string
+  // Max movable in one relayed 2-note spend; decides single-tx vs auto-split loop
+  shieldedMaxSpendable?: string
+  // Unspent note count; sizes the auto-split loop (ceil(noteCount/2) chunks)
+  shieldedNoteCount?: string
+  shieldedScan?: { added: number; balance: string; maxSpendable: string; noteCount: string }
+  shieldedSend?: { hash: string; balance: string }
+  // One relayed chunk of an auto-split spend; UI loops until done is true
+  shieldedSpendChunk?: { done: boolean; remaining: string; sent: string; balance: string }
+  shieldedQuote?: {
+    fee: string
+    netCost: string
+    margin: string
+    marginBps: string
+    calibrated: boolean
+  }
 }
 
 export interface AccountInfo {

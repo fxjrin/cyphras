@@ -38,6 +38,14 @@ interface CachedAssetList {
   cachedAt: number
 }
 
+// Curated icons for assets the remote list omits, keyed by network then "code:issuer"
+const KNOWN_ICONS: Record<string, Record<string, string>> = {
+  testnet: {
+    'USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5':
+      'https://stellar.myfilebase.com/ipfs/QmXPqPAv3oRiQFehNB8Lw25DLuDz8irZwpfU7e6hPsr2qS',
+  },
+}
+
 export async function getIconMap(networkId: string): Promise<Map<string, string>> {
   const iconMap = new Map<string, string>()
   const cacheKey = `${ASSET_LIST_CACHE_KEY_PREFIX}${networkId}`
@@ -62,6 +70,10 @@ export async function getIconMap(networkId: string): Promise<Map<string, string>
     }
   } catch {
     // Icons are non-critical - silently fail
+  }
+  // Overlay curated icons for assets the remote list omits (Circle testnet USDC).
+  for (const [key, url] of Object.entries(KNOWN_ICONS[networkId] ?? {})) {
+    iconMap.set(key, url)
   }
   return iconMap
 }
@@ -132,7 +144,7 @@ export function useBalances(publicKey: string | undefined): BalanceState & { ref
         if (response.unfunded) {
           setState({
             balances: [],
-            totalUsd: null,
+            totalUsd: 0,
             dailyChangeUsd: null,
             dailyChangePct: null,
             loading: false,
@@ -160,16 +172,31 @@ export function useBalances(publicKey: string | undefined): BalanceState & { ref
           icon: undefined,
         }))
 
-        // Show amounts as soon as the account loads so the wallet opens without waiting on prices; totalUsd null marks prices still loading.
-        setState({
-          balances: [...rawBalances].sort(compareBalances),
-          totalUsd: null,
-          dailyChangeUsd: null,
-          dailyChangePct: null,
-          loading: false,
-          error: null,
-          isFunded: true,
-          subentryCount,
+        setState((prev) => {
+          const priced = rawBalances.map((b) => {
+            const prior = prev.balances.find((p) => p.code === b.code && p.issuer === b.issuer)
+            const usdPrice = prior?.usdPrice ?? null
+            const usdValue = usdPrice !== null ? parseFloat(b.balance) * usdPrice : null
+            return {
+              ...b,
+              usdPrice,
+              usdValue,
+              change24h: prior?.change24h ?? null,
+              icon: prior?.icon,
+            }
+          })
+          const totalUsd = priced.some((b) => b.usdValue !== null)
+            ? priced.reduce((sum, b) => (b.usdValue !== null ? sum + b.usdValue : sum), 0)
+            : null
+          return {
+            ...prev,
+            balances: priced.sort(compareBalances),
+            totalUsd,
+            loading: false,
+            error: null,
+            isFunded: true,
+            subentryCount,
+          }
         })
 
         const tokenCodes = [...new Set(rawBalances.map((b) => b.code))]
@@ -190,9 +217,11 @@ export function useBalances(publicKey: string | undefined): BalanceState & { ref
           })
           .sort(compareBalances)
 
-        const totalUsd = balancesWithPrices.reduce((sum, b) => {
-          return b.usdValue !== null ? sum + b.usdValue : sum
-        }, 0)
+        // Null (not 0) until a price loads, so the UI shows a shimmer not a misleading $0.00
+        const hasPrice = balancesWithPrices.some((b) => b.usdValue !== null)
+        const totalUsd = hasPrice
+          ? balancesWithPrices.reduce((sum, b) => (b.usdValue !== null ? sum + b.usdValue : sum), 0)
+          : null
 
         // Portfolio-weighted 24h change: sum(asset_usd_value * asset_change%) / totalUsd
         let dailyChangeUsd: number | null = null
@@ -200,7 +229,7 @@ export function useBalances(publicKey: string | undefined): BalanceState & { ref
         const changeableBalances = balancesWithPrices.filter(
           (b) => b.usdValue !== null && b.change24h !== null
         )
-        if (changeableBalances.length > 0 && totalUsd > 0) {
+        if (changeableBalances.length > 0 && totalUsd !== null && totalUsd > 0) {
           const changeUsd = changeableBalances.reduce((sum, b) => {
             return sum + (b.usdValue! * b.change24h!) / 100
           }, 0)

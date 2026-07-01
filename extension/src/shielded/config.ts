@@ -42,6 +42,45 @@ export const POOLS: Pool[] = [
     decimals: 7,
     maxDeposit: 1_000_000_000n,
   },
+  {
+    id: "usdc",
+    label: "USDC",
+    vaultId: "CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ",
+    domain: 67891n,
+    indexerUrl: `${BASE}/usdc/indexer`,
+    relayerUrl: `${BASE}/usdc/relayer`,
+    relayerAddress: "GASOF6NKJJWYE4AB2SFXK6RD26VBYGWNK2KL7TLZT2S3YRS3NRQWH4UQ",
+    native: false,
+    assetCode: "USDC",
+    assetIssuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    decimals: 7,
+    maxDeposit: 100_000_000_000n,
+  },
 ];
 
 export const poolById = (id: string): Pool => POOLS.find((p) => p.id === id) ?? POOLS[0];
+
+// bigint fields as strings so the pool survives JSON chrome.runtime messaging
+export interface SerializedPool extends Omit<Pool, "domain" | "maxDeposit" | "swapMinRatePpm"> {
+  domain: string;
+  maxDeposit: string;
+  swapMinRatePpm?: string;
+}
+
+export function serializePool(pool: Pool): SerializedPool {
+  return {
+    ...pool,
+    domain: pool.domain.toString(),
+    maxDeposit: pool.maxDeposit.toString(),
+    swapMinRatePpm: pool.swapMinRatePpm?.toString(),
+  };
+}
+
+export function deserializePool(s: SerializedPool): Pool {
+  return {
+    ...s,
+    domain: BigInt(s.domain),
+    maxDeposit: BigInt(s.maxDeposit),
+    swapMinRatePpm: s.swapMinRatePpm !== undefined ? BigInt(s.swapMinRatePpm) : undefined,
+  };
+}

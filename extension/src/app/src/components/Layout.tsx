@@ -1,13 +1,23 @@
 import { useAppContext } from '@/hooks/useAppContext'
+import { GradualBlur } from '@/components/GradualBlur'
 
 interface LayoutProps {
   children: React.ReactNode
   variant?: 'scroll' | 'centered'
   navbar?: React.ReactNode
   footer?: React.ReactNode
+  bottomBlur?: boolean
+  bottomBlurVisible?: boolean
 }
 
-export function Layout({ children, variant = 'scroll', navbar, footer }: LayoutProps) {
+export function Layout({
+  children,
+  variant = 'scroll',
+  navbar,
+  footer,
+  bottomBlur = false,
+  bottomBlurVisible = false,
+}: LayoutProps) {
   const ctx = useAppContext()
 
   if (ctx === 'tab') {
@@ -49,7 +59,7 @@ export function Layout({ children, variant = 'scroll', navbar, footer }: LayoutP
   }
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div className="relative h-full flex flex-col bg-background">
       {navbar && (
         <div className="shrink-0 px-5 pt-5 pb-3 bg-background border-b border-border/40">
           {navbar}
@@ -57,6 +67,7 @@ export function Layout({ children, variant = 'scroll', navbar, footer }: LayoutP
       )}
       <div className="flex-1 overflow-y-auto min-h-0 px-5 py-5">{children}</div>
       {footer && <div className="shrink-0 border-t border-border px-5 py-4">{footer}</div>}
+      {bottomBlur && <GradualBlur visible={bottomBlurVisible} />}
     </div>
   )
 }

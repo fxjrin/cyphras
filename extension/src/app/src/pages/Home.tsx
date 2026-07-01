@@ -1,15 +1,25 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { useWallet } from '@/context/WalletContext'
 import { useNetwork } from '@/context/NetworkContext'
 import { useBalances } from '@/hooks/useBalances'
 import { useHiddenAssets } from '@/hooks/useHiddenAssets'
+import { usePullToPrivate } from '@/hooks/usePullToPrivate'
+import { useShieldedAvailable } from '@/hooks/useShieldedAvailable'
+import { useShieldedBalances } from '@/hooks/useShieldedBalances'
 import { usePreferences } from '@/context/PreferencesContext'
 import { Button } from '@/components/ui/button'
 import { Layout } from '@/components/Layout'
 import { Skeleton } from '@/components/ui/skeleton'
 import WalletNavbar from '@/components/WalletNavbar'
 import TokenDetailSheet from '@/components/TokenDetailSheet'
+import ShieldedReceive from '@/components/ShieldedReceive'
+import ShieldedSend, { type ShieldedAction } from '@/components/ShieldedSend'
+import ShieldedTokenPicker, { type ShieldedTokenRow } from '@/components/ShieldedTokenPicker'
+import ShieldedTokenSheet from '@/components/ShieldedTokenSheet'
+import { PrivateModeHint } from '@/components/PrivateModeHint'
+import { getIconMap } from '@/hooks/useBalances'
 import { Alert } from '@/components/Alert'
 import { PhaseBadge } from '@/components/PhaseBadge'
 import { DeliveryProgressBar } from '@/components/DeliveryProgressBar'
@@ -28,16 +38,21 @@ import {
   Layers,
   ArrowUpDown,
   MoreHorizontal,
+  Copy,
   EyeOff,
   Eye,
   Plus,
   Check,
   X,
   ChevronDown,
+  ArrowDownToLine,
+  ArrowUpFromLine,
 } from 'lucide-react'
 
 // Newest dismissed completion-notice timestamp; only sends newer than this are announced.
 const PRIVATE_ACK_KEY = 'cyphras_private_ack'
+// One-time flag: the private-mode coach-mark is shown until dismissed or discovered.
+const PRIVATE_HINT_KEY = 'cyphras_private_hint_seen'
 
 function XlmIcon() {
   return (
@@ -132,12 +147,91 @@ function BalanceSkeleton() {
 
 export default function Home() {
   const navigate = useNavigate()
-  const { status } = useWallet()
-  const { activeNetwork } = useNetwork()
-  const { balances, totalUsd, dailyChangeUsd, dailyChangePct, loading, error, isFunded, refresh } =
-    useBalances(status.publicKey)
+  const { status, activePublicKey } = useWallet()
+  const { activeNetwork, setActiveNetwork } = useNetwork()
+  const {
+    balances,
+    subentryCount,
+    totalUsd,
+    dailyChangeUsd,
+    dailyChangePct,
+    loading,
+    error,
+    isFunded,
+    refresh,
+  } = useBalances(status.publicKey)
   const { formatValue, formatPrice, hideBalance, setHideBalance } = usePreferences()
   const { hiddenAssets } = useHiddenAssets(activeNetwork.id, status.publicKey ?? '')
+  const { active, showPrivate, exit, handlers, peek, swipe } = usePullToPrivate()
+  const {
+    available: shieldedAvailable,
+    pools: shieldedPools,
+    onTestnet: shieldedOnTestnet,
+  } = useShieldedAvailable()
+  const [switchingNet, setSwitchingNet] = useState(false)
+  // Pool the private surfaces act on; clamped to the active network's pool set.
+  const [selectedPoolId, setSelectedPoolId] = useState<string>(shieldedPools[0]?.poolId ?? 'xlm')
+  const selectedPool =
+    shieldedPools.find((p) => p.poolId === selectedPoolId) ?? shieldedPools[0] ?? null
+  const poolId = selectedPool?.poolId ?? 'xlm'
+  // Scan up front while private mode is merely available so entering it is instant.
+  const {
+    byPool: shieldedByPool,
+    privateTotalUsd,
+    privateChangeUsd,
+    privateChangePct,
+    refresh: refreshShielded,
+  } = useShieldedBalances(
+    shieldedAvailable,
+    activePublicKey,
+    activeNetwork.id,
+    shieldedPools
+  )
+  const shieldedBalance = shieldedByPool[poolId]?.balance ?? null
+  const shieldedMaxSpendable = shieldedByPool[poolId]?.maxSpendable ?? null
+  const shieldedNoteCount = shieldedByPool[poolId]?.noteCount ?? null
+  const [shieldedReceiveOpen, setShieldedReceiveOpen] = useState(false)
+  const [shieldedAction, setShieldedAction] = useState<ShieldedAction | null>(null)
+  // Picker drives send/shield/unshield; tappedPoolId opens the per-token sheet.
+  const [pickerAction, setPickerAction] = useState<ShieldedAction | null>(null)
+  const [tappedPoolId, setTappedPoolId] = useState<string | null>(null)
+  const [shieldedIcons, setShieldedIcons] = useState<Map<string, string>>(new Map())
+  // Default seen=true so the coach-mark never flashes before the stored flag loads.
+  const [hintSeen, setHintSeen] = useState(true)
+  useEffect(() => {
+    chrome.storage.local.get(PRIVATE_HINT_KEY, (res) => setHintSeen(!!res[PRIVATE_HINT_KEY]))
+  }, [])
+  // Opening private mode counts as discovering it, so stop hinting afterward.
+  useEffect(() => {
+    if (active && !hintSeen) {
+      chrome.storage.local.set({ [PRIVATE_HINT_KEY]: true })
+      setHintSeen(true)
+    }
+  }, [active, hintSeen])
+  function dismissHint() {
+    chrome.storage.local.set({ [PRIVATE_HINT_KEY]: true })
+    setHintSeen(true)
+  }
+  const masked = hideBalance || showPrivate
+  const [exitHover, setExitHover] = useState(false)
+  const [swiping, setSwiping] = useState(false)
+  useEffect(() => {
+    if (!active) {
+      setExitHover(false)
+      setSwiping(false)
+      // Reset to the first pool on private-mode exit so re-entering always starts on XLM.
+      setSelectedPoolId(shieldedPools[0]?.poolId ?? 'xlm')
+      setPickerAction(null)
+      setTappedPoolId(null)
+    }
+  }, [active, shieldedPools])
+
+  useEffect(() => {
+    // Keep the selection valid when a network switch changes the pool set.
+    if (shieldedPools.length > 0 && !shieldedPools.some((p) => p.poolId === selectedPoolId)) {
+      setSelectedPoolId(shieldedPools[0].poolId)
+    }
+  }, [shieldedPools, selectedPoolId])
   const displayBalances = balances.filter((b) => !hiddenAssets.includes(`${b.code}:${b.issuer}`))
   const [fundingLoading, setFundingLoading] = useState(false)
   const [fundingError, setFundingError] = useState('')
@@ -148,6 +242,11 @@ export default function Home() {
   const [progressExpanded, setProgressExpanded] = useState(false)
   const [ackAt, setAckAt] = useState(0)
   const menuRef = useRef<HTMLDivElement>(null)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const shieldedMenuRef = useRef<HTMLDivElement>(null)
+  const [shieldedMenuOpen, setShieldedMenuOpen] = useState(false)
+  const [copiedCy1, setCopiedCy1] = useState(false)
+  const [shieldedAddr, setShieldedAddr] = useState<string | null>(null)
 
   const publicKey = status.publicKey ?? ''
 
@@ -219,10 +318,32 @@ export default function Home() {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false)
       }
+      if (shieldedMenuRef.current && !shieldedMenuRef.current.contains(e.target as Node)) {
+        setShieldedMenuOpen(false)
+      }
     }
-    if (menuOpen) document.addEventListener('mousedown', handleClickOutside)
+    if (menuOpen || shieldedMenuOpen) document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [menuOpen])
+  }, [menuOpen, shieldedMenuOpen])
+
+  // Prefetch the cy1 address so the kebab copy writes to the clipboard within the user gesture.
+  useEffect(() => {
+    if (!shieldedAvailable) {
+      setShieldedAddr(null)
+      return
+    }
+    let live = true
+    chrome.runtime.sendMessage(
+      { type: SERVICE_TYPES.SHIELDED_RECEIVE_ADDRESS },
+      (r: ServiceResponse) => {
+        if (!live || chrome.runtime.lastError || r?.error) return
+        if (r?.shieldedAddress) setShieldedAddr(r.shieldedAddress)
+      }
+    )
+    return () => {
+      live = false
+    }
+  }, [shieldedAvailable, activePublicKey])
 
   const refreshNotes = useCallback(() => {
     chrome.runtime.sendMessage({ type: SERVICE_TYPES.PRIVATE_LIST_NOTES }, (r: ServiceResponse) => {
@@ -277,6 +398,48 @@ export default function Home() {
     return () => chrome.storage.onChanged.removeListener(onChanged)
   }, [publicKey, refreshNotes])
 
+  useEffect(() => {
+    // Repaint the private balance when a background spend or scan changes any shielded note store.
+    if (!shieldedAvailable || !active) return
+    const onChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
+      if (area !== 'local') return
+      if (Object.keys(changes).some((k) => k.startsWith('cyphras_shielded_notes_'))) {
+        refreshShielded()
+      }
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+  }, [shieldedAvailable, active, refreshShielded])
+
+  useEffect(() => {
+    // Same issuer-icon source as the public list so private surfaces show the real logo.
+    if (!shieldedAvailable) return
+    getIconMap(activeNetwork.id).then(setShieldedIcons)
+  }, [shieldedAvailable, activeNetwork.id])
+
+  // Force-exit private mode on network or account change so scoped shielded surfaces cannot leak.
+  const shieldedScopeGuard = useRef<{ net: string; pk: string } | null>(null)
+  useEffect(() => {
+    const scope = { net: activeNetwork.id, pk: activePublicKey }
+    if (shieldedScopeGuard.current === null) {
+      shieldedScopeGuard.current = scope
+      return
+    }
+    if (
+      shieldedScopeGuard.current.net === scope.net &&
+      shieldedScopeGuard.current.pk === scope.pk
+    ) {
+      return
+    }
+    shieldedScopeGuard.current = scope
+    setShieldedReceiveOpen(false)
+    setShieldedAction(null)
+    setPickerAction(null)
+    setTappedPoolId(null)
+    setSelectedPoolId(shieldedPools[0]?.poolId ?? 'xlm')
+    exit()
+  }, [activeNetwork.id, activePublicKey, shieldedPools, exit])
+
   async function handleFundWithFriendbot() {
     if (!status.publicKey || !activeNetwork.friendbotUrl) return
     setFundingLoading(true)
@@ -315,46 +478,334 @@ export default function Home() {
     return formatValue(value)
   }
 
+  const shieldedDecimals = selectedPool?.decimals ?? 7
+  const shieldedLabel = selectedPool?.label ?? 'XLM'
+  // Unshield to a classic asset needs a trustline, proven by a matching balance entry.
+  const shieldedHasTrustline =
+    !selectedPool ||
+    selectedPool.native ||
+    balances.some(
+      (b) => b.code === selectedPool.assetCode && b.issuer === selectedPool.assetIssuer
+    )
+
+  function stroopsToDisplay(stroops: string, decimals: number): string {
+    const base = 10n ** BigInt(decimals)
+    const v = BigInt(stroops)
+    const frac = (v % base).toString().padStart(decimals, '0').replace(/0+$/, '')
+    return frac ? `${v / base}.${frac}` : (v / base).toString()
+  }
+
+  // Native pools use the inline XLM glyph; others reuse the public list's issuer icon.
+  function poolIcon(pool: (typeof shieldedPools)[number]): string | undefined {
+    if (pool.native) return undefined
+    return pool.icon ?? shieldedIcons.get(`${pool.assetCode}:${pool.assetIssuer}`)
+  }
+
+  // Per-pool rows for the list and send/unshield pickers, built from the shielded scan.
+  const shieldedTokenRows: ShieldedTokenRow[] = shieldedPools.map((pool) => {
+    const pb = shieldedByPool[pool.poolId]
+    const code = pool.native ? 'XLM' : (pool.assetCode ?? pool.label)
+    return {
+      poolId: pool.poolId,
+      code,
+      label: pool.label,
+      balance: pb?.balance != null ? stroopsToDisplay(pb.balance, pool.decimals) : '0',
+      usdValue: pb?.usdValue ?? null,
+      usdPrice: pb?.usdPrice ?? null,
+      icon: poolIcon(pool),
+    }
+  })
+
+  // Shield moves public funds in, so its picker shows each pool's public balance.
+  const shieldPickerRows: ShieldedTokenRow[] = shieldedPools.map((pool) => {
+    const code = pool.native ? 'XLM' : (pool.assetCode ?? pool.label)
+    const match = balances.find((b) =>
+      pool.native ? b.isNative : b.code === pool.assetCode && b.issuer === pool.assetIssuer
+    )
+    return {
+      poolId: pool.poolId,
+      code,
+      label: pool.label,
+      balance: match ? formatBalance(match.balance) : '0',
+      usdValue: match?.usdValue ?? null,
+      icon: poolIcon(pool),
+    }
+  })
+
+  const pickerRows = pickerAction === 'shield' ? shieldPickerRows : shieldedTokenRows
+  const tappedToken = shieldedTokenRows.find((r) => r.poolId === tappedPoolId) ?? null
+
+  function copyPrivateAddress() {
+    if (!shieldedAddr) return
+    navigator.clipboard.writeText(shieldedAddr)
+    setCopiedCy1(true)
+    setTimeout(() => setCopiedCy1(false), 2000)
+  }
+
+  // Select the pool, then open the shielded send form for the chosen action.
+  function openShieldedForPool(targetPoolId: string, nextAction: ShieldedAction) {
+    setSelectedPoolId(targetPoolId)
+    // Close the picker/tap-sheet as the form opens so the chip's change-asset reopen is clean.
+    setPickerAction(null)
+    setTappedPoolId(null)
+    setShieldedAction(nextAction)
+  }
+
+  // The balance card shows the private 24h change in private mode, else the public one.
+  const inPrivateCard = showPrivate && shieldedAvailable
+  const cardChangeUsd = inPrivateCard ? privateChangeUsd : dailyChangeUsd
+  const cardChangePct = inPrivateCard ? privateChangePct : dailyChangePct
+  const cardChangeMasked = inPrivateCard ? hideBalance : masked
+
   return (
     <>
-      <Layout navbar={<WalletNavbar />}>
+      <Layout
+        navbar={<WalletNavbar />}
+        bottomBlur={active}
+        bottomBlurVisible={exitHover || swiping}
+      >
         <div className="flex flex-col gap-4">
           {loading ? (
             <BalanceSkeleton />
           ) : (
             <>
-              <div className="rounded-xl bg-card p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-muted-foreground">Total balance</p>
-                  <button
-                    onClick={() => setHideBalance(!hideBalance)}
-                    aria-label={hideBalance ? 'Show balance' : 'Hide balance'}
-                    aria-pressed={hideBalance}
-                    className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-                  >
-                    {hideBalance ? <Eye size={14} /> : <EyeOff size={14} />}
-                  </button>
-                </div>
-                <p className="mt-1 text-2xl font-bold text-foreground tracking-wider">
-                  {hideBalance ? (
-                    '******'
-                  ) : totalUsd !== null ? (
-                    formatSmall(totalUsd)
-                  ) : (
-                    <span className="inline-block h-7 w-28 animate-pulse rounded bg-muted align-middle" />
-                  )}
-                </p>
-                {!hideBalance && dailyChangeUsd !== null && dailyChangePct !== null && (
-                  <p
-                    className={`mt-0.5 text-xs font-medium ${dailyChangeUsd >= 0 ? 'text-green-500' : 'text-destructive'}`}
-                  >
-                    {dailyChangeUsd >= 0 ? '+' : ''}
-                    {formatSmall(dailyChangeUsd)} ({dailyChangePct >= 0 ? '+' : ''}
-                    {dailyChangePct.toFixed(2)}%)
+              <div className="peel-wrap">
+                <div className="peel-under">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-muted-foreground">Private balance</p>
+                    <span className="rounded-md p-1 text-muted-foreground">
+                      {hideBalance ? <Eye size={14} /> : <EyeOff size={14} />}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-2xl font-bold text-foreground tracking-wider">
+                    {hideBalance ? (
+                      '******'
+                    ) : privateTotalUsd !== null ? (
+                      formatSmall(privateTotalUsd)
+                    ) : (
+                      <span className="inline-block h-7 w-28 animate-pulse rounded bg-muted align-middle" />
+                    )}
                   </p>
-                )}
+                  <p
+                    className={`mt-0.5 text-xs font-medium ${privateChangeUsd !== null && privateChangeUsd >= 0 ? 'text-green-500' : 'text-destructive'}`}
+                  >
+                    {!hideBalance && privateChangeUsd !== null && privateChangePct !== null ? (
+                      <>
+                        {privateChangeUsd >= 0 ? '+' : ''}
+                        {formatSmall(privateChangeUsd)} ({privateChangePct >= 0 ? '+' : ''}
+                        {privateChangePct.toFixed(2)}%)
+                      </>
+                    ) : (
+                      <span className="invisible">0</span>
+                    )}
+                  </p>
+                </div>
+                <div ref={cardRef} className="peel-card rounded-xl bg-card p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-muted-foreground">
+                      {showPrivate ? 'Private balance' : 'Total balance'}
+                    </p>
+                    <button
+                      onClick={() => setHideBalance(!hideBalance)}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      aria-label={hideBalance ? 'Show balance' : 'Hide balance'}
+                      aria-pressed={hideBalance}
+                      className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                    >
+                      {hideBalance ? <Eye size={14} /> : <EyeOff size={14} />}
+                    </button>
+                  </div>
+                  <p className="mt-1 text-2xl font-bold text-foreground tracking-wider">
+                    {showPrivate && shieldedAvailable ? (
+                      hideBalance ? (
+                        '******'
+                      ) : privateTotalUsd !== null ? (
+                        formatSmall(privateTotalUsd)
+                      ) : (
+                        <span className="inline-block h-7 w-28 animate-pulse rounded bg-muted align-middle" />
+                      )
+                    ) : masked ? (
+                      '******'
+                    ) : totalUsd !== null ? (
+                      formatSmall(totalUsd)
+                    ) : (
+                      <span className="inline-block h-7 w-28 animate-pulse rounded bg-muted align-middle" />
+                    )}
+                  </p>
+                  <p
+                    className={`mt-0.5 text-xs font-medium ${cardChangeUsd !== null && cardChangeUsd >= 0 ? 'text-green-500' : 'text-destructive'}`}
+                  >
+                    {!cardChangeMasked && cardChangeUsd !== null && cardChangePct !== null ? (
+                      <>
+                        {cardChangeUsd >= 0 ? '+' : ''}
+                        {formatSmall(cardChangeUsd)} ({cardChangePct >= 0 ? '+' : ''}
+                        {cardChangePct.toFixed(2)}%)
+                      </>
+                    ) : (
+                      <span className="invisible">0</span>
+                    )}
+                  </p>
+                </div>
+                {createPortal(<div className="peel-flap" />, document.body)}
+                <div
+                  className="peel-grab"
+                  onPointerDown={handlers.onPointerDown}
+                  onPointerMove={handlers.onPointerMove}
+                  onPointerUp={handlers.onPointerUp}
+                  onPointerCancel={handlers.onPointerUp}
+                  onLostPointerCapture={handlers.onPointerUp}
+                  onMouseEnter={peek.onMouseEnter}
+                  onMouseLeave={peek.onMouseLeave}
+                />
               </div>
 
+              {active && shieldedAvailable && (
+                <>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      {
+                        icon: Send,
+                        label: 'Send',
+                        onClick: () => setPickerAction('send'),
+                      },
+                      {
+                        icon: ArrowDownToLine,
+                        label: 'Shield',
+                        onClick: () => setPickerAction('shield'),
+                      },
+                      {
+                        icon: ArrowUpFromLine,
+                        label: 'Unshield',
+                        onClick: () => setPickerAction('unshield'),
+                      },
+                      {
+                        icon: QrCode,
+                        label: 'Receive',
+                        onClick: () => setShieldedReceiveOpen(true),
+                      },
+                    ].map(({ icon: Icon, label, onClick }) => (
+                      <button
+                        key={label}
+                        onClick={onClick}
+                        className="flex flex-col items-center gap-1.5 rounded-xl bg-card py-3 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
+                      >
+                        <Icon size={18} />
+                        <span className="text-xs">{label}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between px-1">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        Shielded tokens
+                      </p>
+                      <div className="relative" ref={shieldedMenuRef}>
+                        <button
+                          onClick={() => setShieldedMenuOpen((o) => !o)}
+                          aria-label="Shielded options"
+                          aria-expanded={shieldedMenuOpen}
+                          className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+                        {shieldedMenuOpen && (
+                          <div className="absolute right-0 top-full mt-1 z-30 w-52 rounded-xl border border-border bg-background shadow-lg py-1 overflow-hidden">
+                            <button
+                              className="cursor-pointer flex w-full items-center gap-2 px-3 py-2.5 text-sm text-foreground hover:bg-muted transition-colors"
+                              onClick={() => {
+                                refreshShielded()
+                                setShieldedMenuOpen(false)
+                              }}
+                            >
+                              <RefreshCw size={14} className="text-muted-foreground" />
+                              Refresh
+                            </button>
+                            <button
+                              disabled={!shieldedAddr}
+                              className="cursor-pointer flex w-full items-center gap-2 px-3 py-2.5 text-sm text-foreground hover:bg-muted transition-colors disabled:cursor-default disabled:opacity-50"
+                              onClick={copyPrivateAddress}
+                            >
+                              {copiedCy1 ? (
+                                <Check size={14} className="text-muted-foreground" />
+                              ) : (
+                                <Copy size={14} className="text-muted-foreground" />
+                              )}
+                              {copiedCy1 ? 'Copied!' : 'Copy private address'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {shieldedTokenRows.map((t) => (
+                      <button
+                        key={t.poolId}
+                        onClick={() => setTappedPoolId(t.poolId)}
+                        className="cursor-pointer flex w-full items-center justify-between rounded-xl bg-card px-4 py-3 hover:bg-muted/60 transition-colors text-left"
+                      >
+                        <div className="flex items-center gap-3">
+                          <AssetIcon icon={t.icon} code={t.code} />
+                          <div className="flex flex-col">
+                            <p className="text-sm font-medium text-foreground">{t.code}</p>
+                            <p className="text-xs text-muted-foreground tracking-wider">
+                              {hideBalance ? '****' : t.balance}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          {hideBalance ? (
+                            <p className="text-sm font-medium text-foreground tracking-wider">
+                              ****
+                            </p>
+                          ) : t.usdValue !== null ? (
+                            <p className="text-sm text-foreground">{formatSmall(t.usdValue)}</p>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">-</p>
+                          )}
+                          {!hideBalance && t.usdPrice != null && (
+                            <p className="text-xs text-muted-foreground">{formatPrice(t.usdPrice)}</p>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {active && !shieldedAvailable && (
+                <div className="flex flex-col gap-3 rounded-xl bg-card p-5 text-center">
+                  <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-primary/15">
+                    <EyeOff size={20} className="text-primary" />
+                  </div>
+                  {!shieldedOnTestnet ? (
+                    <>
+                      <p className="text-sm font-medium text-foreground">
+                        Private mode runs on testnet
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Switch to the testnet network to shield, send, and receive privately.
+                      </p>
+                      <Button
+                        className="w-full"
+                        disabled={switchingNet}
+                        onClick={async () => {
+                          setSwitchingNet(true)
+                          await setActiveNetwork('testnet')
+                          setSwitchingNet(false)
+                        }}
+                      >
+                        {switchingNet ? 'Switching...' : 'Switch to testnet'}
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Private mode needs an account created from a recovery phrase.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!active && (
               <div className="grid grid-cols-4 gap-2">
                 {[
                   { icon: Send, label: 'Send', onClick: () => navigate('/send') },
@@ -372,6 +823,7 @@ export default function Home() {
                   </button>
                 ))}
               </div>
+              )}
 
               {hasInFlight && !progressDismissed && (
                 <div className="rounded-xl bg-card px-4 py-3">
@@ -505,7 +957,7 @@ export default function Home() {
                 </div>
               )}
 
-              {isFunded && displayBalances.length > 0 && (
+              {!active && isFunded && displayBalances.length > 0 && (
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center justify-between px-1">
                     <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
@@ -567,12 +1019,12 @@ export default function Home() {
                         <div className="flex flex-col">
                           <p className="text-sm font-medium text-foreground">{asset.code}</p>
                           <p className="text-xs text-muted-foreground tracking-wider">
-                            {hideBalance ? '****' : formatBalance(asset.balance)}
+                            {masked ? '****' : formatBalance(asset.balance)}
                           </p>
                         </div>
                       </div>
                       <div className="text-right">
-                        {hideBalance ? (
+                        {masked ? (
                           <p className="text-sm font-medium text-foreground tracking-wider">****</p>
                         ) : asset.usdValue !== null ? (
                           <p className="text-sm text-foreground">{formatSmall(asset.usdValue)}</p>
@@ -596,6 +1048,29 @@ export default function Home() {
 
           {error && <Alert message={error} onRetry={() => refresh()} retrying={loading} />}
         </div>
+        {active && (
+          <div
+            className="exit-handle"
+            onPointerDown={(e) => {
+              setSwiping(true)
+              swipe.onPointerDown(e)
+            }}
+            onPointerMove={swipe.onPointerMove}
+            onPointerUp={() => {
+              setSwiping(false)
+              swipe.onPointerUp()
+            }}
+            onPointerCancel={() => {
+              setSwiping(false)
+              swipe.onPointerUp()
+            }}
+            onMouseEnter={() => setExitHover(true)}
+            onMouseLeave={() => setExitHover(false)}
+          >
+            <span className="exit-hint">Swipe up to exit</span>
+            <span className="exit-grip" />
+          </div>
+        )}
       </Layout>
 
       <TokenDetailSheet
@@ -603,6 +1078,65 @@ export default function Home() {
         horizonUrl={activeNetwork.horizonUrl}
         onClose={() => setSelectedToken(null)}
       />
+
+      <ShieldedReceive
+        open={shieldedReceiveOpen}
+        onClose={() => setShieldedReceiveOpen(false)}
+      />
+
+      {pickerAction && (
+        <ShieldedTokenPicker
+          action={pickerAction}
+          tokens={pickerRows}
+          onSelect={(picked) => openShieldedForPool(picked, pickerAction)}
+          onClose={() => setPickerAction(null)}
+        />
+      )}
+
+      <ShieldedTokenSheet
+        token={tappedToken}
+        onSend={(picked) => openShieldedForPool(picked, 'send')}
+        onReceive={() => setShieldedReceiveOpen(true)}
+        onClose={() => setTappedPoolId(null)}
+      />
+
+      <ShieldedSend
+        action={shieldedAction}
+        shieldedBalance={shieldedBalance}
+        maxSpendable={shieldedMaxSpendable}
+        noteCount={shieldedNoteCount}
+        poolId={poolId}
+        assetLabel={shieldedLabel}
+        decimals={shieldedDecimals}
+        assetCode={selectedPool?.assetCode}
+        assetIssuer={selectedPool?.assetIssuer}
+        assetIcon={selectedPool ? poolIcon(selectedPool) : undefined}
+        native={!!selectedPool?.native}
+        publicBalance={
+          (selectedPool?.native
+            ? balances.find((b) => b.isNative)
+            : balances.find(
+                (b) => b.code === selectedPool?.assetCode && b.issuer === selectedPool?.assetIssuer
+              )
+          )?.balance ?? null
+        }
+        subentryCount={subentryCount}
+        hasTrustline={shieldedHasTrustline}
+        horizonUrl={activeNetwork.horizonUrl}
+        networkPassphrase={activeNetwork.passphrase}
+        onTrustlineAdded={refresh}
+        onChangeAsset={() => {
+          // Reopen the picker for the current action so the chip switches pools.
+          if (shieldedAction) setPickerAction(shieldedAction)
+          setShieldedAction(null)
+        }}
+        onClose={() => setShieldedAction(null)}
+        onDone={refreshShielded}
+      />
+
+      {!active && shieldedAvailable && !hintSeen && !loading && (
+        <PrivateModeHint targetRef={cardRef} onDismiss={dismissHint} />
+      )}
     </>
   )
 }

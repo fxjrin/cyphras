@@ -78,6 +78,16 @@ import { NonRepresentableAmountError } from '../private/denominations'
 import { RelayerError } from '../private/relayerClient'
 import { generateProof } from './offscreenProver'
 import {
+  shieldedReceiveAddress,
+  shieldedQuote,
+  shieldedGetBalance,
+  shieldedScan,
+  shieldedShield,
+  shieldedSend,
+  shieldedUnshield,
+  shieldedSpendChunk,
+} from './shielded'
+import {
   trackInstall,
   trackDailyPing,
   trackConnect,
@@ -424,6 +434,22 @@ function friendlyPrivateError(err: unknown, asset: string): string {
     return "This amount can't be split into the available privacy denominations. Try a rounder amount."
   }
   return 'Private payment service is temporarily unavailable. Try again shortly.'
+}
+
+// Pass through user-safe shielded errors; anything else gets a generic message.
+function friendlyShieldedError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : ''
+  const safe = [
+    'wallet locked',
+    'private mode is testnet only',
+    'private mode needs an HD account',
+    'not enough shielded balance',
+    'consolidate first',
+    'no active account',
+    'trustline',
+  ]
+  if (safe.some((s) => msg.includes(s))) return msg
+  return 'Private mode is temporarily unavailable. Try again shortly.'
 }
 
 // A reveal pays via SAC transfer (cannot fund a new account; wrapped assets need a trustline). Verify
@@ -3531,6 +3557,186 @@ async function handleService(message: ServicePayload, sendResponse: (r: ServiceR
       // No-ops if the wallet is locked or private payments are unavailable on this network.
       void kickPrivateProcessor()
       sendResponse({ ok: true })
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_RECEIVE_ADDRESS: {
+      // poolId is optional here: the cy1 address is pool-independent.
+      const m = message as unknown as { poolId?: string }
+      const poolId = isNonEmptyString(m.poolId) ? m.poolId : undefined
+      try {
+        const net = await getActiveNetwork()
+        const { address } = await shieldedReceiveAddress(net, poolId)
+        sendResponse({ shieldedAddress: address })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_QUOTE: {
+      const m = message as unknown as { poolId?: string }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      const poolId = m.poolId
+      try {
+        const net = await getActiveNetwork()
+        const q = await shieldedQuote(net, poolId)
+        sendResponse({
+          shieldedQuote: {
+            fee: q.fee.toString(),
+            netCost: q.netCost.toString(),
+            margin: q.margin.toString(),
+            marginBps: q.marginBps.toString(),
+            calibrated: q.calibrated,
+          },
+        })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_GET_BALANCE: {
+      const m = message as unknown as { poolId?: string }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      const poolId = m.poolId
+      try {
+        const net = await getActiveNetwork()
+        const { balance, maxSpendable, noteCount } = await shieldedGetBalance(net, poolId)
+        sendResponse({
+          shieldedBalance: balance,
+          shieldedMaxSpendable: maxSpendable,
+          shieldedNoteCount: noteCount,
+        })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_SCAN: {
+      const m = message as unknown as { poolId?: string }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      const poolId = m.poolId
+      try {
+        const net = await getActiveNetwork()
+        const res = await shieldedScan(net, poolId)
+        sendResponse({ shieldedScan: res })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_SHIELD: {
+      const m = message as unknown as { poolId?: string; amount?: string }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      if (!m.amount || !/^[0-9]+$/.test(m.amount)) {
+        sendResponse({ error: 'amount must be a positive integer in stroops' })
+        return
+      }
+      const poolId = m.poolId
+      try {
+        const net = await getActiveNetwork()
+        const res = await shieldedShield(net, poolId, BigInt(m.amount))
+        sendResponse({ shieldedSend: res })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_SEND: {
+      const m = message as unknown as { poolId?: string; recipient?: string; amount?: string }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      if (!m.recipient || typeof m.recipient !== 'string') {
+        sendResponse({ error: 'recipient is required' })
+        return
+      }
+      if (!m.amount || !/^[0-9]+$/.test(m.amount)) {
+        sendResponse({ error: 'amount must be a positive integer in stroops' })
+        return
+      }
+      const poolId = m.poolId
+      try {
+        const net = await getActiveNetwork()
+        const res = await shieldedSend(net, poolId, m.recipient, BigInt(m.amount))
+        sendResponse({ shieldedSend: res })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_UNSHIELD: {
+      const m = message as unknown as { poolId?: string; amount?: string }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      if (!m.amount || !/^[0-9]+$/.test(m.amount)) {
+        sendResponse({ error: 'amount must be a positive integer in stroops' })
+        return
+      }
+      const poolId = m.poolId
+      try {
+        const net = await getActiveNetwork()
+        const res = await shieldedUnshield(net, poolId, BigInt(m.amount))
+        sendResponse({ shieldedSend: res })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
+      break
+    }
+
+    case SERVICE_TYPES.SHIELDED_SPEND_CHUNK: {
+      const m = message as unknown as {
+        poolId?: string
+        action?: string
+        recipient?: string
+        remaining?: string
+      }
+      if (!isNonEmptyString(m.poolId)) {
+        sendResponse({ error: 'poolId is required' })
+        return
+      }
+      if (m.action !== 'send' && m.action !== 'unshield') {
+        sendResponse({ error: "action must be 'send' or 'unshield'" })
+        return
+      }
+      if (m.action === 'send' && !isNonEmptyString(m.recipient)) {
+        sendResponse({ error: 'recipient is required' })
+        return
+      }
+      if (!m.remaining || !/^[0-9]+$/.test(m.remaining)) {
+        sendResponse({ error: 'remaining must be a positive integer in stroops' })
+        return
+      }
+      const poolId = m.poolId
+      const action = m.action
+      const recipient = action === 'send' ? m.recipient! : null
+      try {
+        const net = await getActiveNetwork()
+        const res = await shieldedSpendChunk(net, poolId, action, recipient, BigInt(m.remaining))
+        sendResponse({ shieldedSpendChunk: res })
+      } catch (err) {
+        sendResponse({ error: friendlyShieldedError(err) })
+      }
       break
     }
 

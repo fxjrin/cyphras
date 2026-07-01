@@ -7,38 +7,22 @@ import {
 import { RPC_URL, NETWORK_PASSPHRASE, FRIENDBOT, type Pool } from "./config";
 import type { Wallet } from "./wallet";
 import { diversifiedKey } from "./wallet";
-import { buildTransaction, noteCommitment, noteNullifier, type InNote, type OutNote, type TxProofHex } from "./prover";
+import { buildTransaction, noteCommitment, noteNullifier, type InNote, type OutNote, type TxProofHex, type ProveFn } from "./prover";
 import { type Point, randScalar } from "./babyjub";
 import type { ExtData } from "./extdata";
-import { proofScVal, extScVal } from "./scval";
 import { addNote, markSpent, loadNotes, type Note } from "./notes";
 import { relayerSubmit, getQuote } from "./relayer";
 import { fetchCommitments, spendPaths } from "./tree";
+import { awaitTx, submit, submitPlan } from "./submit";
+
+// Re-exported from submit.ts so the background can import the submit path without the heavy crypto.
+export { awaitTx, submit, submitPlan };
 
 const fromHex = (s: string) => Uint8Array.from((s.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)));
 const toHex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 const noteD = (note: Note) => (note.d ? fromHex(note.d) : new Uint8Array(11));
 // pk_d of a note we own, from our ivk and the note's diversifier.
 const notePkd = (wallet: Wallet, note: Note) => diversifiedKey(wallet.ivk, noteD(note));
-
-/** Wait for final on-chain status before mutating local note state, so a failed
- * tx never marks a note spent or adds a phantom note. */
-async function awaitTx(hash: string): Promise<void> {
-  // Read status from raw RPC JSON; server.getTransaction decodes the result
-  // meta and throws on TransactionMetaV4 in older SDK builds.
-  for (let i = 0; i < 40; i++) {
-    const res = await fetch(RPC_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTransaction", params: { hash } }),
-    });
-    const status = (await res.json())?.result?.status as string | undefined;
-    if (status === "SUCCESS") return;
-    if (status === "FAILED") throw new Error("transaction failed on-chain");
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error("confirmation timeout - note state left unchanged");
-}
 
 const server = new rpc.Server(RPC_URL);
 const horizon = new Horizon.Server("https://horizon-testnet.stellar.org");
@@ -153,11 +137,28 @@ function dummyInput(wallet: Wallet): InNote {
 
 const selfOut = (wallet: Wallet, amount: bigint, blinding: bigint): OutNote => ({ amount, pkD: wallet.pkD, blinding });
 
-/** Shield `amount` stroops of the pool's asset into a single private note. Both
- * inputs are dummies (amount 0), so no Merkle path or indexer is needed; the
- * deposit output is locked to the depositor's own pk_d. The user signs and
- * submits the transact themselves (deposits cannot be relayed). */
-export async function shield(wallet: Wallet, amount: bigint, pool: Pool, artifacts = "/circuits"): Promise<string> {
+/** A built, proven spend ready to submit; carries no storage side effects. */
+export interface SpendPlan {
+  proof: TxProofHex;
+  ext: ExtData;
+  selfSign: boolean; // true = depositor signs and submits; false = relayer submits
+  spent: string[]; // commitments of input notes consumed
+  added: Note[]; // new notes created (deposit/change), leafIndex -1 until indexed
+}
+
+/** Build/prove options threaded into buildTransaction. */
+export interface BuildOpts {
+  relay?: boolean;
+  artifacts?: string;
+  prove?: ProveFn;
+}
+
+const addedNote = (amount: bigint, blinding: bigint, d: Uint8Array, commitment: string): Note => ({
+  amount: amount.toString(), blinding: blinding.toString(), d: toHex(d), commitment, leafIndex: -1, spent: false,
+});
+
+/** Build + prove a shield (deposit) into one private note, doing NO submit and NO storage. */
+export async function buildShield(wallet: Wallet, amount: bigint, pool: Pool, opts: BuildOpts = {}): Promise<SpendPlan> {
   const root = await vaultRoot(pool, wallet.address);
   const { encryptNote } = await import("./crypto");
 
@@ -173,26 +174,83 @@ export async function shield(wallet: Wallet, amount: bigint, pool: Pool, artifac
     encryptedOutput1: await encryptNote(wallet.pkD, wallet.d, 0n, dummyBlind),
   };
 
-  const { proof } = await buildTransaction(root, inputs, outputs, ext, pool.domain, artifacts);
-  const hash = await submit(pool, wallet, proof, ext);
-  await awaitTx(hash);
-  addNote(pool.id, wallet.address, { amount: amount.toString(), blinding: outBlind.toString(), d: toHex(wallet.d), commitment: proof.commitments[0], leafIndex: -1, spent: false });
-  return hash;
+  const { proof } = await buildTransaction(root, inputs, outputs, ext, pool.domain, { artifacts: opts.artifacts, prove: opts.prove });
+  return { proof, ext, selfSign: true, spent: [], added: [addedNote(amount, outBlind, wallet.d, proof.commitments[0])] };
 }
 
-async function submit(pool: Pool, wallet: Wallet, proof: TxProofHex, e: ExtData): Promise<string> {
-  const contract = new Contract(pool.vaultId);
-  const acct = await server.getAccount(wallet.address);
-  let tx = new TransactionBuilder(acct, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
-    .addOperation(contract.call(
-      "transact", proofScVal(proof),
-      extScVal({ ext_amount: e.extAmount, fee: 0n, recipient: e.recipient, relayer: e.relayer, encrypted_output0: e.encryptedOutput0, encrypted_output1: e.encryptedOutput1 }),
-      nativeToScVal(wallet.address, { type: "address" }),
-    ))
-    .setTimeout(60).build();
-  tx = await server.prepareTransaction(tx);
-  tx.sign(wallet.stellar);
-  return (await server.sendTransaction(tx)).hash;
+/** Build + prove a withdraw to the wallet's public balance, doing NO submit and NO storage. */
+export async function buildWithdraw(wallet: Wallet, notes: Note[], amount: bigint, pool: Pool, opts: BuildOpts = {}): Promise<SpendPlan> {
+  // Self-signed withdraw (relay disabled) skips the relayer: no fee, sender pays.
+  const selfSign = opts.relay === false;
+  const { encryptNote } = await import("./crypto");
+  const { inputs, root } = await spendInputsFor(pool, wallet, notes);
+  const fee = selfSign ? 0n : await getQuote(pool);
+  const change = sumNotes(notes) - amount - fee;
+  if (change < 0n) throw new Error("amount + fee exceeds notes");
+  const changeBlind = randScalar();
+  const dummyBlind = randScalar();
+  const outputs: [OutNote, OutNote] = [selfOut(wallet, change, changeBlind), selfOut(wallet, 0n, dummyBlind)];
+  const ext: ExtData = {
+    extAmount: -amount, fee, recipient: wallet.address,
+    relayer: selfSign ? wallet.address : pool.relayerAddress,
+    encryptedOutput0: await encryptNote(wallet.pkD, wallet.d, change, changeBlind),
+    encryptedOutput1: await encryptNote(wallet.pkD, wallet.d, 0n, dummyBlind),
+  };
+  const { proof } = await buildTransaction(root, inputs, outputs, ext, pool.domain, { artifacts: opts.artifacts, prove: opts.prove });
+  return {
+    proof, ext, selfSign, spent: notes.map((n) => n.commitment),
+    added: change > 0n ? [addedNote(change, changeBlind, wallet.d, proof.commitments[0])] : [],
+  };
+}
+
+/** Build + prove a private transfer to another user's receiving address, doing NO submit and NO storage. */
+export async function buildTransferTo(wallet: Wallet, notes: Note[], amount: bigint, recipientAddr: string, pool: Pool, opts: BuildOpts = {}): Promise<SpendPlan> {
+  const { parseAddress } = await import("./wallet");
+  const { encryptNote } = await import("./crypto");
+  const r = await parseAddress(recipientAddr); // { d, pkD }, validated in-subgroup
+  const fee = await getQuote(pool);
+  const change = sumNotes(notes) - amount - fee;
+  if (change < 0n) throw new Error("amount + fee exceeds notes");
+
+  const { inputs, root } = await spendInputsFor(pool, wallet, notes);
+  const b0 = randScalar();
+  const b1 = randScalar();
+  const outputs: [OutNote, OutNote] = [
+    { amount, pkD: r.pkD, blinding: b0 }, // locked to the recipient's diversified key
+    selfOut(wallet, change, b1),
+  ];
+  const ext: ExtData = {
+    extAmount: 0n, fee, recipient: pool.relayerAddress, relayer: pool.relayerAddress, // recipient unused (ext_amount==0); relayer addr avoids leaking the sender
+    encryptedOutput0: await encryptNote(r.pkD, r.d, amount, b0), // recipient's note (their diversifier)
+    encryptedOutput1: await encryptNote(wallet.pkD, wallet.d, change, b1), // our change (encrypted even if zero)
+  };
+  const { proof } = await buildTransaction(root, inputs, outputs, ext, pool.domain, { artifacts: opts.artifacts, prove: opts.prove });
+  return {
+    proof, ext, selfSign: false, spent: notes.map((n) => n.commitment),
+    added: change > 0n ? [addedNote(change, b1, wallet.d, proof.commitments[1])] : [],
+  };
+}
+
+/** True if any input note is already nullified on-chain, for idempotent retry after a timed-out submit. */
+export async function notesSpent(pool: Pool, wallet: Wallet, notes: Note[]): Promise<boolean> {
+  for (const n of notes) {
+    if (n.leafIndex < 0) continue;
+    const pkD = await notePkd(wallet, n);
+    const nf = await noteNullifier(BigInt(n.amount), pkD, wallet.nsk, BigInt(n.blinding), n.leafIndex);
+    const res = await fetch(`${pool.indexerUrl}/nullifier/${nf.toString(16).padStart(64, "0")}`);
+    if (!res.ok) throw new Error(`indexer /nullifier returned ${res.status}`);
+    if ((await res.json()).spent === true) return true;
+  }
+  return false;
+}
+
+/** Shield `amount` stroops of the pool's asset into a single private note; the user signs and submits. */
+export async function shield(wallet: Wallet, amount: bigint, pool: Pool, artifacts = "/circuits"): Promise<string> {
+  const plan = await buildShield(wallet, amount, pool, { artifacts });
+  const hash = await submitPlan(pool, wallet.stellar, plan);
+  await awaitTx(hash);
+  for (const n of plan.added) addNote(pool.id, wallet.address, n);
+  return hash;
 }
 
 /** Locate a note's leaf index on-chain by matching its recomputed commitment
@@ -235,27 +293,11 @@ export async function withdraw(
   pool: Pool,
   opts: { relay?: boolean; artifacts?: string } = {},
 ): Promise<string> {
-  // Self-signed withdraw (relay disabled) skips the relayer: no fee, sender pays.
-  const selfSign = opts.relay === false;
-  const { encryptNote } = await import("./crypto");
-  const { inputs, root } = await spendInputsFor(pool, wallet, notes);
-  const fee = selfSign ? 0n : await getQuote(pool);
-  const change = sumNotes(notes) - amount - fee;
-  if (change < 0n) throw new Error("amount + fee exceeds notes");
-  const changeBlind = randScalar();
-  const dummyBlind = randScalar();
-  const outputs: [OutNote, OutNote] = [selfOut(wallet, change, changeBlind), selfOut(wallet, 0n, dummyBlind)];
-  const e: ExtData = {
-    extAmount: -amount, fee, recipient: wallet.address,
-    relayer: selfSign ? wallet.address : pool.relayerAddress,
-    encryptedOutput0: await encryptNote(wallet.pkD, wallet.d, change, changeBlind),
-    encryptedOutput1: await encryptNote(wallet.pkD, wallet.d, 0n, dummyBlind),
-  };
-  const { proof } = await buildTransaction(root, inputs, outputs, e, pool.domain, opts.artifacts);
-  const hash = selfSign ? await submit(pool, wallet, proof, e) : await relayerSubmit(pool, proof, e);
+  const plan = await buildWithdraw(wallet, notes, amount, pool, opts);
+  const hash = await submitPlan(pool, wallet.stellar, plan);
   await awaitTx(hash);
-  for (const n of notes) markSpent(pool.id, wallet.address, n.commitment);
-  if (change > 0n) addNote(pool.id, wallet.address, { amount: change.toString(), blinding: changeBlind.toString(), d: toHex(wallet.d), commitment: proof.commitments[0], leafIndex: -1, spent: false });
+  for (const c of plan.spent) markSpent(pool.id, wallet.address, c);
+  for (const n of plan.added) addNote(pool.id, wallet.address, n);
   return hash;
 }
 
@@ -284,74 +326,27 @@ export async function transfer(wallet: Wallet, notes: Note[], amount: bigint, po
   return hash;
 }
 
-/** Merge one or two notes into a single note worth their sum minus the fee. No
- * custody movement. The merged note is encrypted to our own viewing key so it
- * survives a local-storage loss (recoverable by scanning). */
-export async function consolidate(wallet: Wallet, notes: Note[], pool: Pool): Promise<string> {
-  const { encryptNote } = await import("./crypto");
-  const { inputs, root } = await spendInputsFor(pool, wallet, notes);
-  const fee = await getQuote(pool);
-  const merged = sumNotes(notes) - fee;
-  if (merged <= 0n) throw new Error("notes too small to cover the fee");
-  const b0 = randScalar();
-  const dummyBlind = randScalar();
-  const outputs: [OutNote, OutNote] = [selfOut(wallet, merged, b0), selfOut(wallet, 0n, dummyBlind)];
-  const e: ExtData = {
-    extAmount: 0n, fee, recipient: pool.relayerAddress, relayer: pool.relayerAddress,
-    encryptedOutput0: await encryptNote(wallet.pkD, wallet.d, merged, b0),
-    encryptedOutput1: await encryptNote(wallet.pkD, wallet.d, 0n, dummyBlind),
-  };
-  const { proof } = await buildTransaction(root, inputs, outputs, e, pool.domain);
-  const hash = await relayerSubmit(pool, proof, e);
-  await awaitTx(hash);
-  for (const n of notes) markSpent(pool.id, wallet.address, n.commitment);
-  addNote(pool.id, wallet.address, { amount: merged.toString(), blinding: b0.toString(), d: toHex(wallet.d), commitment: proof.commitments[0], leafIndex: -1, spent: false });
-  return hash;
-}
-
 /** Private transfer to another user's receiving address. output[0] is locked to
  * the recipient's spend pubkey and encrypted to their viewing key (they discover
  * it by scanning); output[1] is change back to self. No custody movement. */
 export async function transferTo(wallet: Wallet, notes: Note[], amount: bigint, recipientAddr: string, pool: Pool): Promise<string> {
-  const { parseAddress } = await import("./wallet");
-  const { encryptNote } = await import("./crypto");
-  const r = await parseAddress(recipientAddr); // { d, pkD }, validated in-subgroup
-  const fee = await getQuote(pool);
-  const change = sumNotes(notes) - amount - fee;
-  if (change < 0n) throw new Error("amount + fee exceeds notes");
-
-  const { inputs, root } = await spendInputsFor(pool, wallet, notes);
-  const b0 = randScalar();
-  const b1 = randScalar();
-  const outputs: [OutNote, OutNote] = [
-    { amount, pkD: r.pkD, blinding: b0 }, // locked to the recipient's diversified key
-    selfOut(wallet, change, b1),
-  ];
-  const e: ExtData = {
-    extAmount: 0n, fee, recipient: pool.relayerAddress, relayer: pool.relayerAddress, // recipient unused (ext_amount==0); relayer addr avoids leaking the sender
-    encryptedOutput0: await encryptNote(r.pkD, r.d, amount, b0), // recipient's note (their diversifier)
-    encryptedOutput1: await encryptNote(wallet.pkD, wallet.d, change, b1), // our change (encrypted even if zero)
-  };
-  const { proof } = await buildTransaction(root, inputs, outputs, e, pool.domain);
-  const hash = await relayerSubmit(pool, proof, e);
+  const plan = await buildTransferTo(wallet, notes, amount, recipientAddr, pool);
+  const hash = await submitPlan(pool, wallet.stellar, plan);
   await awaitTx(hash);
-  for (const n of notes) markSpent(pool.id, wallet.address, n.commitment);
-  if (change > 0n) addNote(pool.id, wallet.address, { amount: change.toString(), blinding: b1.toString(), d: toHex(wallet.d), commitment: proof.commitments[1], leafIndex: -1, spent: false });
+  for (const c of plan.spent) markSpent(pool.id, wallet.address, c);
+  for (const n of plan.added) addNote(pool.id, wallet.address, n);
   return hash;
 }
 
-/** Discover incoming notes from a persisted cursor (or from 0 on a full rescan):
- * scan commitments' encrypted_output, decrypt with the viewing key, and add notes
- * locked to this wallet's spend key. Incremental by default; pass { full: true }
- * to re-scan the whole history (e.g. after a local-storage loss). */
-export async function scanIncoming(wallet: Wallet, pool: Pool, opts: { full?: boolean } = {}): Promise<number> {
+/** Discover incoming notes for this wallet by trial-decrypting outputs, doing NO storage. */
+export async function buildScan(
+  wallet: Wallet,
+  pool: Pool,
+  knownCommitments: string[],
+  since = 0,
+): Promise<Note[]> {
   const { decryptNote } = await import("./crypto");
-  const cursorKey = `scanCursor:${pool.id}:${wallet.address}`;
-  const since = opts.full ? 0 : Number(localStorage.getItem(cursorKey) ?? "0");
-  // A recovered note may already be spent; its on-chain nullifier is the source
-  // of truth, so mark spent rather than resurrect it as spendable. Fail closed:
-  // if spent status cannot be confirmed, abort rather than persist as unspent
-  // (which would inflate the balance and later fail on-chain). The caller retries.
+  // Fail closed: if spent status cannot be confirmed, abort rather than return it as unspent.
   const isSpent = async (nf: bigint): Promise<boolean> => {
     const res = await fetch(`${pool.indexerUrl}/nullifier/${nf.toString(16).padStart(64, "0")}`);
     if (!res.ok) throw new Error(`indexer /nullifier returned ${res.status} - scan aborted to avoid wrong spent status`);
@@ -368,12 +363,10 @@ export async function scanIncoming(wallet: Wallet, pool: Pool, opts: { full?: bo
     throw new Error("indexer unreachable - cannot scan for incoming notes (" + (e as Error).message + ")");
   }
 
-  const existing = new Set(loadNotes(pool.id, wallet.address).map((n) => n.commitment)); // incl. spent, so spent notes are not resurrected
-  let added = 0;
-  let maxLeaf = since - 1;
+  const known = new Set(knownCommitments); // incl. spent, so spent notes are not resurrected
+  const notes: Note[] = [];
   for (const row of rows) {
     const leafIndex = Number(row.leaf_index);
-    if (leafIndex > maxLeaf) maxLeaf = leafIndex;
     if (!row.encrypted_output) continue;
     const enc = Uint8Array.from(row.encrypted_output.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
     const dec = await decryptNote(wallet.ivk, enc);
@@ -383,16 +376,29 @@ export async function scanIncoming(wallet: Wallet, pool: Pool, opts: { full?: bo
     const pkD = await diversifiedKey(wallet.ivk, dec.d);
     const c = await noteCommitment(dec.amount, pkD, dec.blinding);
     if (c !== BigInt("0x" + row.commitment)) continue;
-    if (existing.has(row.commitment)) continue;
+    if (known.has(row.commitment)) continue;
     const nf = await noteNullifier(dec.amount, pkD, wallet.nsk, dec.blinding, leafIndex);
     const spent = await isSpent(nf);
-    addNote(pool.id, wallet.address, { amount: dec.amount.toString(), blinding: dec.blinding.toString(), d: toHex(dec.d), commitment: row.commitment, leafIndex, spent });
-    existing.add(row.commitment);
-    if (!spent) added++;
+    notes.push({ amount: dec.amount.toString(), blinding: dec.blinding.toString(), d: toHex(dec.d), commitment: row.commitment, leafIndex, spent });
+    known.add(row.commitment);
   }
-  // Advance the cursor past every leaf seen so the next poll only fetches new
-  // outputs. A thrown isSpent aborts above and leaves the cursor, so the scan
-  // retries from the same point (fail-closed).
+  return notes;
+}
+
+/** Discover and persist incoming notes from a persisted cursor; pass { full: true } to re-scan all history. */
+export async function scanIncoming(wallet: Wallet, pool: Pool, opts: { full?: boolean } = {}): Promise<number> {
+  const cursorKey = `scanCursor:${pool.id}:${wallet.address}`;
+  const since = opts.full ? 0 : Number(localStorage.getItem(cursorKey) ?? "0");
+  const known = loadNotes(pool.id, wallet.address).map((n) => n.commitment);
+  const notes = await buildScan(wallet, pool, known, since);
+  let added = 0;
+  let maxLeaf = since - 1;
+  for (const n of notes) {
+    addNote(pool.id, wallet.address, n);
+    if (n.leafIndex > maxLeaf) maxLeaf = n.leafIndex;
+    if (!n.spent) added++;
+  }
+  // Advance the cursor past the highest matched leaf; a thrown buildScan leaves it so the scan retries (fail-closed).
   if (maxLeaf >= since) localStorage.setItem(cursorKey, String(maxLeaf + 1));
   return added;
 }

@@ -22,7 +22,8 @@
       "@/*": ["src/*"],
       "@constants/*": ["../constants/*"],
       "@ext-types/*": ["../types/*"],
-      "@private/*": ["../private/*"]
+      "@private/*": ["../private/*"],
+      "@shielded/*": ["../shielded/*"]
     }
   },
   "include": ["src"]

@@ -73,6 +73,11 @@ function Router() {
     return <Onboarding />
   }
 
+  // Render Unlock directly while locked; the post-render redirect would let an authenticated page mount and crash first
+  if (!status.isUnlocked) {
+    return <Unlock />
+  }
+
   return (
     <Routes>
       <Route path="/unlock" element={<Unlock />} />

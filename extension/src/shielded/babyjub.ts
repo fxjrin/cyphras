@@ -36,13 +36,15 @@ export async function mulPoint(p: Point, s: bigint): Promise<Point> {
 /** Pack a point to 32 bytes: y little-endian, sign of x in the top bit. */
 export async function packPoint(p: Point): Promise<Uint8Array> {
   const b = await baby();
-  return b.packPoint(toF(b, p));
+  // Copy out: circomlibjs returns a view into a reused scratch buffer a later packPoint would overwrite.
+  return Uint8Array.from(b.packPoint(toF(b, p)));
 }
 
 /** Unpack 32 bytes to a point, or null on an invalid encoding. */
 export async function unpackPoint(buf: Uint8Array): Promise<Point | null> {
   const b = await baby();
-  const P = b.unpackPoint(buf);
+  // Copy: circomlibjs unpackPoint clears the x-sign bit in the input buffer in place, corrupting callers that reuse it.
+  const P = b.unpackPoint(Uint8Array.from(buf));
   return P ? fromF(b, P) : null;
 }
 

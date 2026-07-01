@@ -5,10 +5,7 @@ import * as snarkjs from "snarkjs";
 import { type ExtData, hashExtData, calcPublicAmount } from "./extdata";
 import { encodeProof } from "./encode";
 import { type Point, SUBGROUP_ORDER, mulBase } from "./babyjub";
-import { poseidon2 } from "./poseidon2";
-
-// Default browser path; a Node harness can pass a filesystem path instead.
-const DEFAULT_ARTIFACTS = "/circuits";
+import { poseidon2, circuitBase } from "./poseidon2";
 
 export interface InNote {
   amount: bigint;
@@ -82,8 +79,19 @@ async function inputKeys(
   return { pkD, nkFold };
 }
 
+/** Proves the assembled witness elsewhere so the large zkey never loads in this context. */
+export type ProveFn = (
+  txInput: Record<string, unknown>,
+) => Promise<{ proof: unknown; publicSignals: string[] }>;
+
+export interface BuildTxOpts {
+  artifacts?: string;
+  prove?: ProveFn;
+}
+
 /**
  * @param artifacts - base path holding transaction.wasm / transaction.zkey
+ * @param opts - when opts.prove is set the witness is proven there instead of via snarkjs here
  */
 export async function buildTransaction(
   root: bigint,
@@ -91,8 +99,9 @@ export async function buildTransaction(
   outputs: [OutNote, OutNote],
   ext: ExtData,
   domain: bigint,
-  artifacts: string = DEFAULT_ARTIFACTS,
+  opts: BuildTxOpts = {},
 ): Promise<{ proof: TxProofHex; ext: ExtData; raw: { proof: unknown; publicSignals: string[] } }> {
+  const artifacts = opts.artifacts ?? circuitBase();
   const inNull: bigint[] = [];
   for (const inp of inputs) {
     const { pkD, nkFold } = await inputKeys(inp.ask, inp.nsk, inp.d);
@@ -127,11 +136,13 @@ export async function buildTransaction(
     outBlinding: outputs.map((o) => o.blinding.toString()),
   };
 
-  const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-    txInput,
-    `${artifacts}/transaction.wasm`,
-    `${artifacts}/transaction.zkey`,
-  );
+  const { proof, publicSignals } = opts.prove
+    ? await opts.prove(txInput)
+    : await snarkjs.groth16.fullProve(
+        txInput,
+        `${artifacts}/transaction.wasm`,
+        `${artifacts}/transaction.zkey`,
+      );
 
   const h32 = (x: bigint): string => x.toString(16).padStart(64, "0");
   return {

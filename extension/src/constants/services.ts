@@ -51,6 +51,16 @@ export const SERVICE_TYPES = {
   PRIVATE_SELF_RECLAIM: 'PRIVATE_SELF_RECLAIM',
   PRIVATE_LIST_NOTES: 'PRIVATE_LIST_NOTES',
   PRIVATE_PROCESS_NOTES: 'PRIVATE_PROCESS_NOTES',
+  // Shielded pool; poolId selects the per-pool vault/indexer/note store (optional for RECEIVE_ADDRESS)
+  SHIELDED_RECEIVE_ADDRESS: 'SHIELDED_RECEIVE_ADDRESS',
+  SHIELDED_GET_BALANCE: 'SHIELDED_GET_BALANCE',
+  SHIELDED_SCAN: 'SHIELDED_SCAN',
+  SHIELDED_QUOTE: 'SHIELDED_QUOTE',
+  SHIELDED_SHIELD: 'SHIELDED_SHIELD',
+  SHIELDED_SEND: 'SHIELDED_SEND',
+  SHIELDED_UNSHIELD: 'SHIELDED_UNSHIELD',
+  // One chunk of an auto-split spend, looped by the UI since the circuit spends at most two notes per tx
+  SHIELDED_SPEND_CHUNK: 'SHIELDED_SPEND_CHUNK',
 } as const
 
 export type ServiceType = (typeof SERVICE_TYPES)[keyof typeof SERVICE_TYPES]
