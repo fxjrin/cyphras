@@ -1,0 +1,162 @@
+# Go rewrite of the cy1 private-mode off-chain stack. Runs alongside the existing
+# TypeScript stack on different host ports (809x vs 808x) so both can serve during
+# validation; nginx path-routing under private.cyphras.com switches between them.
+# Same .env variable names as ../offchain so a single config fits both.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cyphras}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-cyphras_shielded}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata_go:/var/lib/postgresql/data
+      - ../offchain/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cyphras} -d ${POSTGRES_DB:-cyphras_shielded}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  indexer:
+    build:
+      context: .
+      args: { SERVICE: indexer }
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-cyphras}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cyphras_shielded}?sslmode=disable
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${VAULT_CONTRACT_ID}
+      CONFIRMATIONS: ${CONFIRMATIONS:-1}
+      SYNC_LAG_THRESHOLD: ${SYNC_LAG_THRESHOLD:-100}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_API_SHARED_SECRET: ${ADMIN_API_SHARED_SECRET:-}
+      PORT: "8090"
+    ports:
+      - "127.0.0.1:8090:8090"
+    restart: unless-stopped
+
+  relayer:
+    build:
+      context: .
+      args: { SERVICE: relayer }
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${VAULT_CONTRACT_ID}
+      RELAYER_SECRET: ${RELAYER_SECRET}
+      POOL_RELAYER_ADDRESS: ${POOL_RELAYER_ADDRESS:-GASOF6NKJJWYE4AB2SFXK6RD26VBYGWNK2KL7TLZT2S3YRS3NRQWH4UQ}
+      NET_COST: ${NET_COST:-700000}
+      MARGIN_BPS: ${MARGIN_BPS:-2000}
+      MIN_MARGIN_BPS: ${MIN_MARGIN_BPS:-500}
+      QUOTE_BUFFER_BPS: ${QUOTE_BUFFER_BPS:-1000}
+      RATE_PPM: ${RATE_PPM:-1000000}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_API_SHARED_SECRET: ${ADMIN_API_SHARED_SECRET:-}
+      PORT: "8091"
+    ports:
+      - "127.0.0.1:8091:8091"
+    restart: unless-stopped
+
+  keeper:
+    build:
+      context: .
+      args: { SERVICE: keeper }
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${VAULT_CONTRACT_ID}
+      KEEPER_SECRET: ${KEEPER_SECRET}
+      KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-604800000}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_API_SHARED_SECRET: ${ADMIN_API_SHARED_SECRET:-}
+      PORT: "8092"
+    ports:
+      - "127.0.0.1:8092:8092"
+    restart: unless-stopped
+
+  postgres-usdc:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cyphras}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_USDC_DB:-cyphras_shielded_usdc}
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - pgdata_go_usdc:/var/lib/postgresql/data
+      - ../offchain/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cyphras} -d ${POSTGRES_USDC_DB:-cyphras_shielded_usdc}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  indexer-usdc:
+    build:
+      context: .
+      args: { SERVICE: indexer }
+    depends_on:
+      postgres-usdc:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-cyphras}:${POSTGRES_PASSWORD}@postgres-usdc:5432/${POSTGRES_USDC_DB:-cyphras_shielded_usdc}?sslmode=disable
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${USDC_VAULT_CONTRACT_ID:-CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ}
+      CONFIRMATIONS: ${CONFIRMATIONS:-1}
+      SYNC_LAG_THRESHOLD: ${SYNC_LAG_THRESHOLD:-100}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_API_SHARED_SECRET: ${ADMIN_API_SHARED_SECRET:-}
+      PORT: "8093"
+    ports:
+      - "127.0.0.1:8093:8093"
+    restart: unless-stopped
+
+  relayer-usdc:
+    build:
+      context: .
+      args: { SERVICE: relayer }
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${USDC_VAULT_CONTRACT_ID:-CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ}
+      RELAYER_SECRET: ${RELAYER_SECRET}
+      POOL_RELAYER_ADDRESS: ${POOL_RELAYER_ADDRESS:-GASOF6NKJJWYE4AB2SFXK6RD26VBYGWNK2KL7TLZT2S3YRS3NRQWH4UQ}
+      NET_COST: ${NET_COST:-700000}
+      MARGIN_BPS: ${MARGIN_BPS:-2000}
+      MIN_MARGIN_BPS: ${MIN_MARGIN_BPS:-500}
+      QUOTE_BUFFER_BPS: ${QUOTE_BUFFER_BPS:-1000}
+      RATE_PPM: ${USDC_RATE_PPM:-200000}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_API_SHARED_SECRET: ${ADMIN_API_SHARED_SECRET:-}
+      PORT: "8094"
+    ports:
+      - "127.0.0.1:8094:8094"
+    restart: unless-stopped
+
+  keeper-usdc:
+    build:
+      context: .
+      args: { SERVICE: keeper }
+    environment:
+      RPC_URL: ${RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      VAULT_CONTRACT_ID: ${USDC_VAULT_CONTRACT_ID:-CA4LFR3TYDARWQ3YHUD72X6ZKVXL3BJWA7ZLDVSMOHAVEOQXU7ESOBBQ}
+      KEEPER_SECRET: ${KEEPER_SECRET}
+      KEEPER_INTERVAL_MS: ${KEEPER_INTERVAL_MS:-604800000}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_API_SHARED_SECRET: ${ADMIN_API_SHARED_SECRET:-}
+      PORT: "8095"
+    ports:
+      - "127.0.0.1:8095:8095"
+    restart: unless-stopped
+
+volumes:
+  pgdata_go:
+  pgdata_go_usdc:
